@@ -69,6 +69,12 @@ type Service struct {
 	indexMapMu sync.RWMutex
 }
 
+func (s *Service) ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey) {
+	for k, v := range indexMap {
+		s.indexMap[k] = v
+	}
+}
+
 // log is a service-wide logger.
 var log zerolog.Logger
 
