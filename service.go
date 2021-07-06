@@ -26,6 +26,9 @@ type Service interface {
 	// Name returns the name of the client implementation.
 	Name() string
 
+	// ExtendIndexMap extend exist index map.
+	ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey)
+
 	// Address returns the address of the client.
 	Address() string
 }

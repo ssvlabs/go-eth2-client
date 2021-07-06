@@ -54,6 +54,10 @@ type Service struct {
 	nodeVersionMutex     sync.Mutex
 }
 
+func (s *Service) ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey) {
+	panic("implement me")
+}
+
 // log is a service-wide logger.
 var log zerolog.Logger
 
