@@ -48,3 +48,6 @@ type BLSPubKey [48]byte
 
 // BLSSignature is a BLS12-381 signature.
 type BLSSignature [96]byte
+
+// DutyType is the duty type
+type DutyType string
