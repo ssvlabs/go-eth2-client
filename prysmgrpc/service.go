@@ -130,6 +130,13 @@ func New(ctx context.Context, params ...Parameter) (*Service, error) {
 	return s, nil
 }
 
+// ExtendIndexMap extend exist index map.
+func (s *Service) ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey) {
+	for k, v := range indexMap {
+		s.indexMap[k] = v
+	}
+}
+
 // Name provides the name of the service.
 func (s *Service) Name() string {
 	return "Prysm (gRPC)"
