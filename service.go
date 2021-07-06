@@ -30,6 +30,9 @@ type Service interface {
 
 	// Address returns the address of the client.
 	Address() string
+
+	// ExtendIndexMap extend exist index map.
+	ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey)
 }
 
 // PrysmAttesterDutiesProvider is the interface for providing attester duties with prysm-specific parameters.

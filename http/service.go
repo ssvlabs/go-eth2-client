@@ -59,6 +59,10 @@ type Service struct {
 	supportsV2ValidatorBlocks bool
 }
 
+func (s *Service) ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey) {
+	return
+}
+
 // log is a service-wide logger.
 var log zerolog.Logger
 
