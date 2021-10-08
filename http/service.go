@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	eth2client "github.com/attestantio/go-eth2-client"
 	api "github.com/attestantio/go-eth2-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/pkg/errors"
@@ -67,7 +68,7 @@ func (s *Service) ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey
 var log zerolog.Logger
 
 // New creates a new Ethereum 2 client service, connecting with a standard HTTP.
-func New(ctx context.Context, params ...Parameter) (*Service, error) {
+func New(ctx context.Context, params ...Parameter) (eth2client.Service, error) {
 	parameters, err := parseAndCheckParameters(params...)
 	if err != nil {
 		return nil, errors.Wrap(err, "problem with parameters")
@@ -143,6 +144,9 @@ func (s *Service) fetchStaticValues(ctx context.Context) error {
 	}
 	if _, err := s.ForkSchedule(ctx); err != nil {
 		return errors.Wrap(err, "failed to fetch fork schedule")
+	}
+	if _, err := s.NodeVersion(ctx); err != nil {
+		return errors.Wrap(err, "failed to fetch node version")
 	}
 
 	return nil
