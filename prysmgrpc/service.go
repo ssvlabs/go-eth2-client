@@ -66,6 +66,9 @@ type Service struct {
 }
 
 func (s *Service) ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey) {
+	s.indexMapMu.Lock()
+	defer s.indexMapMu.Unlock()
+
 	for k, v := range indexMap {
 		s.indexMap[k] = v
 	}

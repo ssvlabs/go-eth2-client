@@ -60,7 +60,7 @@ type Service struct {
 	supportsV2ValidatorBlocks bool
 }
 
-func (s *Service) ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey) {
+func (s *Service) ExtendIndexMap(indexMap map[phase0.ValidatorIndex]phase0.BLSPubKey) {
 	return
 }
 
