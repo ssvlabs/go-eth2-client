@@ -15,6 +15,8 @@ package prysmgrpc
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"regexp"
 	"strconv"
 	"strings"
@@ -28,6 +30,7 @@ import (
 	"github.com/rs/zerolog"
 	zerologger "github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 // Service is an Ethereum 2 client service.
@@ -50,13 +53,6 @@ type Service struct {
 	slotsPerEpoch                 *uint64
 	farFutureEpoch                *spec.Epoch
 	targetAggregatorsPerCommittee *uint64
-	beaconAttesterDomain          *spec.DomainType
-	beaconProposerDomain          *spec.DomainType
-	randaoDomain                  *spec.DomainType
-	depositDomain                 *spec.DomainType
-	voluntaryExitDomain           *spec.DomainType
-	selectionProofDomain          *spec.DomainType
-	aggregateAndProofDomain       *spec.DomainType
 	genesisForkVersion            []byte
 
 	// Event handlers.
@@ -70,6 +66,9 @@ type Service struct {
 }
 
 func (s *Service) ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey) {
+	s.indexMapMu.Lock()
+	defer s.indexMapMu.Unlock()
+
 	for k, v := range indexMap {
 		s.indexMap[k] = v
 	}
@@ -92,9 +91,18 @@ func New(ctx context.Context, params ...Parameter) (*Service, error) {
 	}
 
 	grpcOpts := []grpc.DialOption{
-		grpc.WithInsecure(),
 		// Maximum receive value 256 MB
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(256 * 1024 * 1024)),
+	}
+
+	if parameters.tls {
+		credentials, err := tlsCredentials(ctx, parameters.clientCert, parameters.clientKey, parameters.caCert)
+		if err != nil {
+			return nil, errors.Wrap(err, "problem with TLS credentials")
+		}
+		grpcOpts = append(grpcOpts, grpc.WithTransportCredentials(credentials))
+	} else {
+		grpcOpts = append(grpcOpts, grpc.WithInsecure())
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, parameters.timeout)
@@ -184,4 +192,29 @@ func (s *Service) obtainMaxPageSize(ctx context.Context) (int32, error) {
 		return -1, errors.New("invalid value for max page size")
 	}
 	return int32(maxPageSize), nil
+}
+
+// tlsCredentials composes a set of transport credentials given optional client and CA certificates.
+func tlsCredentials(ctx context.Context, clientCert []byte, clientKey []byte, caCert []byte) (credentials.TransportCredentials, error) {
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS13,
+	}
+
+	if clientCert != nil && clientKey != nil {
+		clientPair, err := tls.X509KeyPair(clientCert, clientKey)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to load client keypair")
+		}
+		tlsCfg.Certificates = []tls.Certificate{clientPair}
+	}
+
+	if caCert != nil {
+		cp := x509.NewCertPool()
+		if !cp.AppendCertsFromPEM(caCert) {
+			return nil, errors.New("failed to add CA certificate")
+		}
+		tlsCfg.RootCAs = cp
+	}
+
+	return credentials.NewTLS(tlsCfg), nil
 }

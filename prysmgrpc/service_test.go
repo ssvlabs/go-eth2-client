@@ -1,4 +1,4 @@
-// Copyright © 2020 Attestant Limited.
+// Copyright © 2020, 2021 Attestant Limited.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -51,26 +51,32 @@ func TestInterfaces(t *testing.T) {
 	assert.Implements(t, (*client.ValidatorsProvider)(nil), s)
 
 	// Non-standard APIs.
-	assert.Implements(t, (*client.AggregateAndProofDomainProvider)(nil), s)
 	assert.Implements(t, (*client.AttesterDutiesProvider)(nil), s)
-	assert.Implements(t, (*client.BeaconAttesterDomainProvider)(nil), s)
 	assert.Implements(t, (*client.BeaconBlockRootProvider)(nil), s)
 	assert.Implements(t, (*client.BeaconChainHeadUpdatedSource)(nil), s)
-	assert.Implements(t, (*client.BeaconProposerDomainProvider)(nil), s)
-	assert.Implements(t, (*client.DepositDomainProvider)(nil), s)
 	assert.Implements(t, (*client.GenesisTimeProvider)(nil), s)
 	assert.Implements(t, (*client.GenesisValidatorsRootProvider)(nil), s)
 	assert.Implements(t, (*client.NodeVersionProvider)(nil), s)
 	assert.Implements(t, (*client.ProposerDutiesProvider)(nil), s)
-	assert.Implements(t, (*client.RANDAODomainProvider)(nil), s)
-	assert.Implements(t, (*client.SelectionProofDomainProvider)(nil), s)
 	assert.Implements(t, (*client.SlotDurationProvider)(nil), s)
 	assert.Implements(t, (*client.SlotsPerEpochProvider)(nil), s)
 	assert.Implements(t, (*client.TargetAggregatorsPerCommitteeProvider)(nil), s)
-	assert.Implements(t, (*client.VoluntaryExitDomainProvider)(nil), s)
 	assert.Implements(t, (*client.ValidatorsWithoutBalanceProvider)(nil), s)
 
 	// Prysm-specific APIs.
 	assert.Implements(t, (*client.PrysmAggregateAttestationProvider)(nil), s)
 	assert.Implements(t, (*client.PrysmValidatorBalancesProvider)(nil), s)
+}
+
+func TestTLS(t *testing.T) {
+	if os.Getenv("PRYSMGRPC_TLS_ADDRESS") == "" {
+		t.Skip("PRYSMGRPC_TLS_ADDRESS not specified; not testing secure connection")
+	}
+	s, err := prysmgrpc.New(context.Background(),
+		prysmgrpc.WithAddress(os.Getenv("PRYSMGRPC_TLS_ADDRESS")),
+		prysmgrpc.WithTLS(true),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+	require.Equal(t, os.Getenv("PRYSMGRPC_TLS_ADDRESS"), s.Address())
 }
