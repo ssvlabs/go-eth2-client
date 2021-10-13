@@ -32,7 +32,7 @@ type Service interface {
 	Address() string
 
 	// ExtendIndexMap extend exist index map.
-	ExtendIndexMap(indexMap map[spec.ValidatorIndex]spec.BLSPubKey)
+	ExtendIndexMap(indexMap map[phase0.ValidatorIndex]phase0.BLSPubKey)
 }
 
 // PrysmAttesterDutiesProvider is the interface for providing attester duties with prysm-specific parameters.
