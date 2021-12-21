@@ -18,7 +18,7 @@ require (
 	github.com/r3labs/sse/v2 v2.7.2
 	github.com/rs/zerolog v1.21.0
 	github.com/stretchr/testify v1.7.0
-	golang.org/x/net v0.0.0-20211118161319-6a13c67c3ce4 // indirect -  set specific tag because of an error when build ssv repo
+	golang.org/x/net v0.0.0-20210410081132-afb366fc7cd1 // indirect; set specific tag because of an error when build ssv repo (20210410081132-afb366fc7cd1)
 	google.golang.org/genproto v0.0.0-20210406143921-e86de6bf7a46 // indirect
 	google.golang.org/grpc v1.37.0
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
