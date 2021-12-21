@@ -64,6 +64,10 @@ type Service struct {
 	userPubKeyChunkSize int
 }
 
+func (s *Service) ExtendIndexMap(indexMap map[phase0.ValidatorIndex]phase0.BLSPubKey) {
+	return
+}
+
 // log is a service-wide logger.
 var log zerolog.Logger
 

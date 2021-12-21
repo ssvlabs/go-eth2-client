@@ -30,6 +30,9 @@ type Service interface {
 
 	// Address returns the address of the client.
 	Address() string
+
+	// ExtendIndexMap extend exist index map.
+	ExtendIndexMap(indexMap map[phase0.ValidatorIndex]phase0.BLSPubKey)
 }
 
 // PrysmAttesterDutiesProvider is the interface for providing attester duties with prysm-specific parameters.
@@ -155,18 +158,12 @@ type SignedBeaconBlockProvider interface {
 type BeaconCommitteesProvider interface {
 	// BeaconCommittees fetches all beacon committees for the epoch at the given state.
 	BeaconCommittees(ctx context.Context, stateID string) ([]*api.BeaconCommittee, error)
-
-	// BeaconCommitteesAtEpoch fetches all beacon committees for the given epoch at the given state.
-	BeaconCommitteesAtEpoch(ctx context.Context, stateID string, epoch phase0.Epoch) ([]*api.BeaconCommittee, error)
 }
 
 // SyncCommitteesProvider is the interface for providing sync committees.
 type SyncCommitteesProvider interface {
 	// SyncCommittee fetches the sync committee for the given state.
 	SyncCommittee(ctx context.Context, stateID string) (*api.SyncCommittee, error)
-
-	// SyncCommitteeAtEpoch fetches the sync committee for the given epoch at the given state.
-	SyncCommitteeAtEpoch(ctx context.Context, stateID string, epoch phase0.Epoch) (*api.SyncCommittee, error)
 }
 
 // ValidatorsWithoutBalanceProvider is the interface for providing validator information, minus the balance.
