@@ -58,6 +58,10 @@ type Service struct {
 	supportsV2BeaconBlocks    bool
 	supportsV2BeaconState     bool
 	supportsV2ValidatorBlocks bool
+
+	// User-specified chunk sizes.
+	userIndexChunkSize  int
+	userPubKeyChunkSize int
 }
 
 func (s *Service) ExtendIndexMap(indexMap map[phase0.ValidatorIndex]phase0.BLSPubKey) {
@@ -103,11 +107,13 @@ func New(ctx context.Context, params ...Parameter) (eth2client.Service, error) {
 	}
 
 	s := &Service{
-		ctx:     ctx,
-		base:    base,
-		address: parameters.address,
-		client:  client,
-		timeout: parameters.timeout,
+		ctx:                 ctx,
+		base:                base,
+		address:             parameters.address,
+		client:              client,
+		timeout:             parameters.timeout,
+		userIndexChunkSize:  parameters.indexChunkSize,
+		userPubKeyChunkSize: parameters.pubKeyChunkSize,
 	}
 
 	// Fetch static values to confirm the connection is good.
