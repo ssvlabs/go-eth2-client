@@ -82,7 +82,7 @@ func (s *Service) get(ctx context.Context, endpoint string) (io.Reader, error) {
 	cancel()
 
 	log.Trace().Str("response", string(data)).Msg("GET response")
-
+	fmt.Printf("%s - %s\n", endpoint, string(data))
 	return bytes.NewReader(data), nil
 }
 
