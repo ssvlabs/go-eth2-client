@@ -46,10 +46,10 @@ func (s *Service) AttestationData(ctx context.Context, slot phase0.Slot, committ
 		return nil, errors.New("attestation not returned")
 	}
 	if attestationDataJSON.Data.Slot != slot {
-		return nil, errors.New("attestation data not for requested slot")
+		return nil, errors.New(fmt.Sprintf("wrong slot (expected - %d | actual - %d", slot, attestationDataJSON.Data.Slot))
 	}
 	if attestationDataJSON.Data.Index != committeeIndex {
-		return nil, errors.New("attestation data not for requested committee index")
+		return nil, errors.New(fmt.Sprintf("wrong committeeIndex (expected - %d | actual - %d", committeeIndex, attestationDataJSON.Data.Index))
 	}
 
 	return attestationDataJSON.Data, nil
