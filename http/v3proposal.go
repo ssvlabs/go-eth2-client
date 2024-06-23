@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+
 	apiv1bellatrix "github.com/attestantio/go-eth2-client/api/v1/bellatrix"
 	apiv1capella "github.com/attestantio/go-eth2-client/api/v1/capella"
 	apiv1deneb "github.com/attestantio/go-eth2-client/api/v1/deneb"
@@ -84,7 +85,7 @@ func (s *Service) V3Proposal(ctx context.Context,
 		return nil, errors.New("v3 beacon block proposal not for requested slot")
 	}
 
-	// Only check the RANDAO reveal and graffiti if we are not connected to DVT middleware,
+	// Only check the RANDAO reveal if we are not connected to DVT middleware,
 	// as the returned values will be decided by the middleware.
 	if !s.connectedToDVTMiddleware {
 		blockRandaoReveal, err := response.Data.RandaoReveal()
@@ -93,14 +94,6 @@ func (s *Service) V3Proposal(ctx context.Context,
 		}
 		if !bytes.Equal(blockRandaoReveal[:], opts.RandaoReveal[:]) {
 			return nil, fmt.Errorf("v3 beacon block proposal has RANDAO reveal %#x; expected %#x", blockRandaoReveal[:], opts.RandaoReveal[:])
-		}
-
-		blockGraffiti, err := response.Data.Graffiti()
-		if err != nil {
-			return nil, err
-		}
-		if !bytes.Equal(blockGraffiti[:], opts.Graffiti[:]) {
-			return nil, fmt.Errorf("v3 beacon block proposal has graffiti %#x; expected %#x", blockGraffiti[:], opts.Graffiti[:])
 		}
 	}
 
