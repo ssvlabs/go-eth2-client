@@ -46,11 +46,12 @@ var indexChunkSizes = map[string]int{
 // with 500 bytes for this which results in us having space for 75 public keys.
 // That said, some nodes have their own built-in limits so use them where appropriate.
 var pubKeyChunkSizes = map[string]int{
-	"default":    75,
-	"lighthouse": 75,
-	"nimbus":     75,
-	"prysm":      75,
-	"teku":       75,
+	"default":    128,
+	"lighthouse": 512,
+	"lodestar":   128,
+	"nimbus":     1024,
+	"prysm":      1024,
+	"teku":       512,
 }
 
 // indexChunkSize is the maximum number of validator indices to send in each request.
