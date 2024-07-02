@@ -333,7 +333,7 @@ func (s *Service) chunkedValidatorsByPubkey(ctx context.Context,
 			chunkEnd = len(opts.PubKeys)
 		}
 		chunk := opts.PubKeys[chunkStart:chunkEnd]
-		chunkRes, err := s.Validators(ctx, &api.ValidatorsOpts{State: opts.State, PubKeys: chunk})
+		chunkRes, err := s.Validators(ctx, &api.ValidatorsOpts{State: opts.State, PubKeys: chunk, Common: opts.Common})
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to obtain chunk")
 		}
