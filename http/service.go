@@ -74,6 +74,7 @@ type Service struct {
 	connectedToDVTMiddleware bool
 	reducedMemoryUsage       bool
 	customSpecSupport        bool
+	syncDistanceTolerance    phase0.Slot
 }
 
 // New creates a new Ethereum 2 client service, connecting with a standard HTTP.
@@ -115,19 +116,20 @@ func New(ctx context.Context, params ...Parameter) (client.Service, error) {
 	}
 
 	s := &Service{
-		log:                 log,
-		base:                base,
-		address:             address.String(),
-		client:              httpClient,
-		timeout:             parameters.timeout,
-		userIndexChunkSize:  parameters.indexChunkSize,
-		userPubKeyChunkSize: parameters.pubKeyChunkSize,
-		extraHeaders:        parameters.extraHeaders,
-		enforceJSON:         parameters.enforceJSON,
-		pingSem:             semaphore.NewWeighted(1),
-		hooks:               parameters.hooks,
-		reducedMemoryUsage:  parameters.reducedMemoryUsage,
-		customSpecSupport:   parameters.customSpecSupport,
+		log:                   log,
+		base:                  base,
+		address:               address.String(),
+		client:                httpClient,
+		timeout:               parameters.timeout,
+		userIndexChunkSize:    parameters.indexChunkSize,
+		userPubKeyChunkSize:   parameters.pubKeyChunkSize,
+		extraHeaders:          parameters.extraHeaders,
+		enforceJSON:           parameters.enforceJSON,
+		pingSem:               semaphore.NewWeighted(1),
+		hooks:                 parameters.hooks,
+		reducedMemoryUsage:    parameters.reducedMemoryUsage,
+		customSpecSupport:     parameters.customSpecSupport,
+		syncDistanceTolerance: parameters.syncDistanceTolerance,
 	}
 
 	// Ping the client to see if it is ready to serve requests.
@@ -272,7 +274,13 @@ func (s *Service) CheckConnectionState(ctx context.Context) {
 			synced = false
 		} else {
 			active = true
-			synced = (!response.Data.IsSyncing) || (response.Data.HeadSlot == 0 && response.Data.SyncDistance <= 1)
+			if response.Data.IsSyncing {
+				// Consider a node in the syncing state as healthy only if it has been syncing from scratch and SyncDistance is within the tolerance.
+				synced = response.Data.HeadSlot == 0 && response.Data.SyncDistance <= 1
+			} else {
+				// Consider a node in the synced state as healthy if syncDistanceTolerance is not set or if sync distance is within the configurable tolerance.
+				synced = s.syncDistanceTolerance == 0 || response.Data.SyncDistance <= s.syncDistanceTolerance
+			}
 		}
 		s.pingSem.Release(1)
 	}

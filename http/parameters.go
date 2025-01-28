@@ -18,22 +18,24 @@ import (
 	"time"
 
 	"github.com/attestantio/go-eth2-client/metrics"
+	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/rs/zerolog"
 )
 
 type parameters struct {
-	logLevel           zerolog.Level
-	monitor            metrics.Service
-	address            string
-	timeout            time.Duration
-	indexChunkSize     int
-	pubKeyChunkSize    int
-	extraHeaders       map[string]string
-	enforceJSON        bool
-	allowDelayedStart  bool
-	hooks              *Hooks
-	reducedMemoryUsage bool
-	customSpecSupport  bool
+	logLevel              zerolog.Level
+	monitor               metrics.Service
+	address               string
+	timeout               time.Duration
+	indexChunkSize        int
+	pubKeyChunkSize       int
+	extraHeaders          map[string]string
+	enforceJSON           bool
+	allowDelayedStart     bool
+	hooks                 *Hooks
+	reducedMemoryUsage    bool
+	customSpecSupport     bool
+	syncDistanceTolerance phase0.Slot
 }
 
 // Parameter is the interface for service parameters.
@@ -131,6 +133,13 @@ func WithReducedMemoryUsage(reducedMemoryUsage bool) Parameter {
 func WithCustomSpecSupport(customSpecSupport bool) Parameter {
 	return parameterFunc(func(p *parameters) {
 		p.customSpecSupport = customSpecSupport
+	})
+}
+
+// WithSyncDistanceTolerance sets how many slots are tolerated to consider node as synced. Disabled if 0.
+func WithSyncDistanceTolerance(syncDistanceTolerance phase0.Slot) Parameter {
+	return parameterFunc(func(p *parameters) {
+		p.syncDistanceTolerance = syncDistanceTolerance
 	})
 }
 
