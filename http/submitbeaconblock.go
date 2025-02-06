@@ -20,6 +20,7 @@ import (
 	"errors"
 
 	client "github.com/attestantio/go-eth2-client"
+	"github.com/attestantio/go-eth2-client/api"
 	"github.com/attestantio/go-eth2-client/spec"
 )
 
@@ -49,6 +50,8 @@ func (s *Service) SubmitBeaconBlock(ctx context.Context, block *spec.VersionedSi
 		specJSON, err = json.Marshal(block.Capella)
 	case spec.DataVersionDeneb:
 		specJSON, err = json.Marshal(block.Deneb)
+	case spec.DataVersionElectra:
+		specJSON, err = json.Marshal(block.Electra)
 	default:
 		err = errors.New("unknown block version")
 	}
@@ -56,8 +59,17 @@ func (s *Service) SubmitBeaconBlock(ctx context.Context, block *spec.VersionedSi
 		return errors.Join(errors.New("failed to marshal JSON"), err)
 	}
 
-	_, err = s.post(ctx, "/eth/v1/beacon/blocks", bytes.NewBuffer(specJSON))
-	if err != nil {
+	endpoint := "/eth/v1/beacon/blocks"
+	query := ""
+
+	if _, err := s.post(ctx,
+		endpoint,
+		query,
+		&api.CommonOpts{},
+		bytes.NewReader(specJSON),
+		ContentTypeJSON,
+		map[string]string{},
+	); err != nil {
 		return errors.Join(errors.New("failed to submit beacon block"), err)
 	}
 
