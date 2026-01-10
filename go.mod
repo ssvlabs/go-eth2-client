@@ -1,6 +1,6 @@
 module github.com/attestantio/go-eth2-client
 
-go 1.21.0
+go 1.23.0
 
 toolchain go1.23.2
 
@@ -20,7 +20,7 @@ require (
 	github.com/stretchr/testify v1.8.4
 	go.opentelemetry.io/otel v1.16.0
 	go.opentelemetry.io/otel/trace v1.16.0
-	golang.org/x/crypto v0.33.0
+	golang.org/x/crypto v0.35.0
 	golang.org/x/sync v0.2.0
 )
 
