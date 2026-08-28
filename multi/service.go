@@ -14,14 +14,18 @@
 package multi
 
 import (
+	"cmp"
 	"context"
+	"math"
+	"slices"
 	"sync"
 
-	consensusclient "github.com/attestantio/go-eth2-client"
-	"github.com/attestantio/go-eth2-client/http"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	zerologger "github.com/rs/zerolog/log"
+
+	consensusclient "github.com/attestantio/go-eth2-client"
+	"github.com/attestantio/go-eth2-client/http"
 )
 
 // Service handles multiple Ethereum 2 clients.
@@ -33,6 +37,12 @@ type Service struct {
 	clientsMu       sync.RWMutex
 	activeClients   []consensusclient.Service
 	inactiveClients []consensusclient.Service
+
+	// clientScoresMu guards clientScores.
+	clientScoresMu sync.RWMutex
+	// clientScores maps a client address to its reputation score. Scores start at math.MaxInt and
+	// are decremented on each failed request, so doCall prefers stable clients over flaky ones.
+	clientScores map[string]int
 }
 
 // New creates a new Ethereum 2 client with multiple endpoints.
@@ -101,11 +111,20 @@ func New(ctx context.Context, params ...Parameter) (consensusclient.Service, err
 
 	log.Trace().Int("active", len(activeClients)).Int("inactive", len(inactiveClients)).Msg("Initial providers")
 
+	clientScores := make(map[string]int, len(activeClients)+len(inactiveClients))
+	for _, client := range activeClients {
+		clientScores[client.Address()] = math.MaxInt
+	}
+	for _, client := range inactiveClients {
+		clientScores[client.Address()] = math.MaxInt
+	}
+
 	s := &Service{
 		log:             log,
 		name:            parameters.name,
 		activeClients:   activeClients,
 		inactiveClients: inactiveClients,
+		clientScores:    clientScores,
 	}
 
 	// Set initial metrics.
@@ -130,13 +149,11 @@ func (*Service) Name() string {
 	return "multi"
 }
 
-// Address returns the address of the client.
+// Address returns the address of the best client available.
 func (s *Service) Address() string {
-	s.clientsMu.RLock()
-	defer s.clientsMu.RUnlock()
-
-	if len(s.activeClients) > 0 {
-		return s.activeClients[0].Address()
+	activeClients := s.activeClientsSortedByScore()
+	if len(activeClients) > 0 {
+		return activeClients[0].Address()
 	}
 
 	return "none"
@@ -158,4 +175,32 @@ func (s *Service) IsSynced() bool {
 	defer s.clientsMu.RUnlock()
 
 	return len(s.activeClients) > 0
+}
+
+// activeClientsSortedByScore returns a copy of the active clients sorted by
+// reputation score, highest first. It sorts a copy so the shared slice stays
+// untouched for concurrent readers.
+func (s *Service) activeClientsSortedByScore() []consensusclient.Service {
+	result := s.activeClientsCopy()
+
+	s.clientScoresMu.RLock()
+	defer s.clientScoresMu.RUnlock()
+
+	slices.SortFunc(result, func(a, b consensusclient.Service) int {
+		// Descending order: higher score first.
+		return cmp.Compare(s.scoreClient(b.Address()), s.scoreClient(a.Address()))
+	})
+
+	return result
+}
+
+// activeClientsCopy returns a copy of the activeClients slice.
+func (s *Service) activeClientsCopy() []consensusclient.Service {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+
+	result := make([]consensusclient.Service, 0, len(s.activeClients))
+	result = append(result, s.activeClients...)
+
+	return result
 }

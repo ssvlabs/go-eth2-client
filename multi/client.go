@@ -18,11 +18,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
+
 	consensusclient "github.com/attestantio/go-eth2-client"
 	"github.com/attestantio/go-eth2-client/api"
 	"github.com/attestantio/go-eth2-client/http"
-	"github.com/pkg/errors"
-	"github.com/rs/zerolog"
 )
 
 // monitor monitors active and inactive clients, and moves them between
@@ -138,6 +139,16 @@ func (s *Service) activateClient(ctx context.Context, client consensusclient.Ser
 	s.setConnectionsMetric(ctx, len(s.activeClients), len(s.inactiveClients))
 }
 
+// scoreClient returns the client's reputation score. The caller must hold clientScoresMu.
+func (s *Service) scoreClient(clientAddr string) int {
+	return s.clientScores[clientAddr]
+}
+
+// penalizeClient decrements the client's reputation score. The caller must hold clientScoresMu.
+func (s *Service) penalizeClient(clientAddr string) {
+	s.clientScores[clientAddr]--
+}
+
 // callFunc is the definition for a call function.  It provides a generic return interface
 // to allow the caller to unpick the results as it sees fit.
 type callFunc func(ctx context.Context, client consensusclient.Service) (any, error)
@@ -169,6 +180,9 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 		return nil, errors.New("no clients to which to make call")
 	}
 
+	// Try clients in descending score order, so more reliable ones come first.
+	activeClients = s.activeClientsSortedByScore()
+
 	var (
 		err error
 		res any
@@ -179,20 +193,16 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 
 		res, err = call(ctx, client)
 		if err != nil {
-			log.Trace().Err(err).Msg("Potentially deactivating client due to error")
+			log.Trace().Err(err).Msgf("Potentially failing over from client %s due to error", client.Address())
 
 			var apiErr *api.Error
 			switch {
 			case errors.As(err, &apiErr) && statusCodeFamily(apiErr.StatusCode) == 4:
-				log.Trace().Err(err).Msg("Not deactivating client on user error")
+				log.Trace().Err(err).Msgf("Not failing over from client %s on user error", client.Address())
 
 				return res, err
 			case errors.Is(err, context.Canceled):
-				log.Trace().Msg("Not deactivating client on canceled context")
-
-				return res, err
-			case errors.Is(err, context.DeadlineExceeded):
-				log.Trace().Msg("Not deactivating client on context deadline exceeded")
+				log.Trace().Msgf("Not failing over from client %s on canceled context", client.Address())
 
 				return res, err
 			}
@@ -203,8 +213,11 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 			}
 
 			if failover {
-				log.Debug().Err(err).Msg("Deactivating client on error")
-				s.deactivateClient(ctx, client)
+				log.Debug().Err(err).Msgf("Failing over from client %s on error", client.Address())
+
+				s.clientScoresMu.Lock()
+				s.penalizeClient(client.Address())
+				s.clientScoresMu.Unlock()
 
 				continue
 			}
