@@ -389,6 +389,13 @@ func (*Service) populateProposalDataFromHeaders(response *api.Response[*api.Vers
 				return fmt.Errorf("proposal header Eth-Execution-Payload-Value %s not a valid integer", v)
 			}
 		case strings.EqualFold(k, "Eth-Consensus-Block-Value"):
+			// Prysm may send an empty value; skip it rather than let
+			// SetString("") overwrite the non-nil zero default with nil.
+			// https://github.com/OffchainLabs/prysm/pull/14111
+			if v == "" {
+				continue
+			}
+
 			var success bool
 
 			response.Data.ConsensusValue, success = new(big.Int).SetString(v, 10)
