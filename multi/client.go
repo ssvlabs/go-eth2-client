@@ -41,6 +41,7 @@ func (s *Service) monitor(ctx context.Context) {
 			return
 		case <-time.After(30 * time.Second):
 			s.recheck(ctx)
+			s.decayScores()
 		}
 	}
 }
@@ -104,6 +105,7 @@ func (s *Service) deactivateClient(ctx context.Context, client consensusclient.S
 	s.activeClients = activeClients
 	s.inactiveClients = inactiveClients
 	s.setConnectionsMetric(ctx, len(s.activeClients), len(s.inactiveClients))
+	s.refreshBestClientLocked()
 }
 
 // activateClient activates a client, moving it to the active list if not currently on it.
@@ -136,6 +138,45 @@ func (s *Service) activateClient(ctx context.Context, client consensusclient.Ser
 	s.activeClients = activeClients
 	s.inactiveClients = inactiveClients
 	s.setConnectionsMetric(ctx, len(s.activeClients), len(s.inactiveClients))
+	s.refreshBestClientLocked()
+}
+
+// scoreClient returns the client's reputation score. The caller must hold clientScoresMu.
+func (s *Service) scoreClient(clientAddr string) int {
+	return s.clientScores[clientAddr]
+}
+
+// penalizeClient lowers the client's reputation score by one, down to
+// minClientScore, and returns the new score. The caller must hold clientScoresMu.
+func (s *Service) penalizeClient(clientAddr string) int {
+	if s.clientScores[clientAddr] > minClientScore {
+		s.clientScores[clientAddr]--
+	}
+
+	return s.clientScores[clientAddr]
+}
+
+// decayScores nudges every client's score back towards maxClientScore. It runs
+// periodically from the monitor so a client that has recovered is retried even
+// while it is deprioritised and therefore rarely selected by doCall.
+func (s *Service) decayScores() {
+	s.clientScoresMu.Lock()
+	recovered := make([]string, 0)
+	for addr, score := range s.clientScores {
+		if score < maxClientScore {
+			s.clientScores[addr] = min(score+1, maxClientScore)
+			if s.clientScores[addr] == maxClientScore {
+				recovered = append(recovered, addr)
+			}
+		}
+	}
+	s.clientScoresMu.Unlock()
+
+	for _, addr := range recovered {
+		s.log.Debug().Str("address", addr).Msg("Client score recovered")
+	}
+
+	s.refreshBestClient()
 }
 
 // callFunc is the definition for a call function.  It provides a generic return interface
@@ -152,17 +193,14 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 	log := s.log.With().Logger()
 	ctx = log.WithContext(ctx)
 
-	// Grab local copy of active clients in case it is updated whilst we are using it.
-	s.clientsMu.RLock()
-	activeClients := s.activeClients
-	s.clientsMu.RUnlock()
+	// Take active clients sorted by score (best first). Re-snapshot after a
+	// recheck so the emptiness guard and the loop below use the same set.
+	activeClients := s.activeClientsSortedByScore()
 
 	if len(activeClients) == 0 {
 		// There are no active clients; attempt to re-enable the inactive clients.
 		s.recheck(ctx)
-		s.clientsMu.RLock()
-		activeClients = s.activeClients
-		s.clientsMu.RUnlock()
+		activeClients = s.activeClientsSortedByScore()
 	}
 
 	if len(activeClients) == 0 {
@@ -179,20 +217,16 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 
 		res, err = call(ctx, client)
 		if err != nil {
-			log.Trace().Err(err).Msg("Potentially deactivating client due to error")
+			log.Trace().Err(err).Msg("Potentially failing over due to error")
 
 			var apiErr *api.Error
 			switch {
 			case errors.As(err, &apiErr) && statusCodeFamily(apiErr.StatusCode) == 4:
-				log.Trace().Err(err).Msg("Not deactivating client on user error")
+				log.Trace().Err(err).Msg("Not failing over on user error")
 
 				return res, err
 			case errors.Is(err, context.Canceled):
-				log.Trace().Msg("Not deactivating client on canceled context")
-
-				return res, err
-			case errors.Is(err, context.DeadlineExceeded):
-				log.Trace().Msg("Not deactivating client on context deadline exceeded")
+				log.Trace().Msg("Not failing over on canceled context")
 
 				return res, err
 			}
@@ -203,8 +237,18 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 			}
 
 			if failover {
-				log.Debug().Err(err).Msg("Deactivating client on error")
-				s.deactivateClient(ctx, client)
+				s.clientScoresMu.Lock()
+				score := s.penalizeClient(client.Address())
+				s.clientScoresMu.Unlock()
+				s.refreshBestClient()
+
+				log.Debug().Err(err).Int("score", score).Msg("Failing over on error")
+
+				// Stop iterating if the caller's context is done; otherwise every
+				// remaining client fails instantly and is penalised equally.
+				if ctx.Err() != nil {
+					return res, err
+				}
 
 				continue
 			}
