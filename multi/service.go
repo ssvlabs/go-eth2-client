@@ -14,7 +14,9 @@
 package multi
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -23,6 +25,14 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	zerologger "github.com/rs/zerolog/log"
+)
+
+const (
+	// maxClientScore is the score clients start at and recover to.
+	maxClientScore = 10
+	// minClientScore is the lowest score, which bounds how long a client takes to
+	// recover.
+	minClientScore = 0
 )
 
 // Service handles multiple Ethereum 2 clients.
@@ -39,6 +49,16 @@ type Service struct {
 	// was not synced, or failed to subscribe, when Events was called.  Read it through
 	// retryInterval, which covers it being unset.
 	eventsRetryInterval time.Duration
+
+	// clientScoresMu guards clientScores, clientPenalties and bestClient.
+	clientScoresMu sync.RWMutex
+	// clientScores holds each client's score, by address.  Failures lower it and
+	// decayScores restores it; doCall tries the highest-scored clients first.
+	clientScores map[string]int
+	// clientPenalties counts each client's penalties; see penalizeClient.
+	clientPenalties map[string]uint64
+	// bestClient is the address Address returns; see stickyBestLocked.
+	bestClient string
 }
 
 // defaultEventsRetryInterval is the default for Service.eventsRetryInterval.
@@ -110,12 +130,22 @@ func New(ctx context.Context, params ...Parameter) (consensusclient.Service, err
 
 	log.Trace().Int("active", len(activeClients)).Int("inactive", len(inactiveClients)).Msg("Initial providers")
 
+	clientScores := make(map[string]int, len(activeClients)+len(inactiveClients))
+	for _, client := range activeClients {
+		clientScores[client.Address()] = maxClientScore
+	}
+	for _, client := range inactiveClients {
+		clientScores[client.Address()] = maxClientScore
+	}
+
 	s := &Service{
 		log:                 log,
 		name:                parameters.name,
 		activeClients:       activeClients,
 		inactiveClients:     inactiveClients,
 		eventsRetryInterval: parameters.eventsRetryInterval,
+		clientScores:        clientScores,
+		clientPenalties:     make(map[string]uint64, len(clientScores)),
 	}
 
 	// Set initial metrics.
@@ -129,6 +159,9 @@ func New(ctx context.Context, params ...Parameter) (consensusclient.Service, err
 
 	s.setConnectionsMetric(ctx, len(activeClients), len(inactiveClients))
 
+	// Pick the best client before Address is first called.
+	s.refreshBestClient()
+
 	// Kick off monitor.
 	go s.monitor(ctx)
 
@@ -140,16 +173,22 @@ func (*Service) Name() string {
 	return "multi"
 }
 
-// Address returns the address of the client.
+// Address returns the address of the best active client, or "none".  It is
+// cached, as Events calls it for every event to pick the client to forward from.
 func (s *Service) Address() string {
-	s.clientsMu.RLock()
-	defer s.clientsMu.RUnlock()
+	s.clientScoresMu.RLock()
+	defer s.clientScoresMu.RUnlock()
 
-	if len(s.activeClients) > 0 {
-		return s.activeClients[0].Address()
+	return addressOrNone(s.bestClient)
+}
+
+// addressOrNone returns address, or "none" for no client.
+func addressOrNone(address string) string {
+	if address == "" {
+		return "none"
 	}
 
-	return "none"
+	return address
 }
 
 // IsActive returns true if the client is active.
@@ -168,4 +207,108 @@ func (s *Service) IsSynced() bool {
 	defer s.clientsMu.RUnlock()
 
 	return len(s.activeClients) > 0
+}
+
+// activeClientsSortedByScore returns a copy of the active clients, highest score
+// first.  On a tie the best client comes first, so requests go to the client
+// whose events are forwarded; other ties keep their order.
+func (s *Service) activeClientsSortedByScore() []consensusclient.Service {
+	s.clientsMu.RLock()
+	result := slices.Clone(s.activeClients)
+	s.clientsMu.RUnlock()
+
+	s.clientScoresMu.RLock()
+	defer s.clientScoresMu.RUnlock()
+
+	slices.SortStableFunc(result, func(x, y consensusclient.Service) int {
+		// Highest score first, then the best client.
+		if c := cmp.Compare(s.clientScore(y.Address()), s.clientScore(x.Address())); c != 0 {
+			return c
+		}
+		switch s.bestClient {
+		case x.Address():
+			return -1
+		case y.Address():
+			return 1
+		default:
+			return 0
+		}
+	})
+
+	return result
+}
+
+// refreshBestClient recomputes bestClient after the active set or scores
+// change.  It takes clientsMu, then clientScoresMu.
+func (s *Service) refreshBestClient() {
+	s.refreshBestClientAfterPenalties(nil)
+}
+
+// refreshBestClientAfterPenalties is refreshBestClient after a call penalized
+// the given clients (see stickyBestLocked).
+func (s *Service) refreshBestClientAfterPenalties(penalized []string) {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+
+	s.refreshBestClientLocked(penalized)
+}
+
+// refreshBestClientLocked is refreshBestClientAfterPenalties for a caller that
+// holds clientsMu.  It logs a change, as that moves both requests and events.
+func (s *Service) refreshBestClientLocked(penalized []string) {
+	s.clientScoresMu.Lock()
+	defer s.clientScoresMu.Unlock()
+
+	best := s.stickyBestLocked(penalized)
+	if best == s.bestClient {
+		return
+	}
+
+	event := s.log.Info().Str("previous", addressOrNone(s.bestClient)).Str("best", addressOrNone(best))
+	if best != "" {
+		event = event.Int("score", s.clientScores[best])
+	}
+	event.Msg("Best client changed")
+	s.bestClient = best
+}
+
+// stickyBestLocked returns the address of the highest-scored active client.  On a
+// tie the current best client stays, so events don't switch back and forth as
+// clients recover, unless it is in penalized, the clients that just failed a call,
+// and a tied client is not.  The caller must hold clientsMu and clientScoresMu.
+func (s *Service) stickyBestLocked(penalized []string) string {
+	var (
+		challenger      string
+		challengerScore int
+		incumbentScore  int
+		incumbentActive bool
+	)
+
+	for _, client := range s.activeClients {
+		address := client.Address()
+		score := s.clientScores[address]
+
+		if address == s.bestClient {
+			incumbentScore, incumbentActive = score, true
+
+			continue
+		}
+		// Of equal challengers, prefer one that did not fail the call.
+		if challenger == "" || score > challengerScore ||
+			score == challengerScore && slices.Contains(penalized, challenger) && !slices.Contains(penalized, address) {
+			challenger, challengerScore = address, score
+		}
+	}
+
+	switch {
+	case !incumbentActive:
+		return challenger
+	case challenger == "":
+		return s.bestClient
+	case challengerScore > incumbentScore,
+		challengerScore == incumbentScore && slices.Contains(penalized, s.bestClient) && !slices.Contains(penalized, challenger):
+		return challenger
+	default:
+		return s.bestClient
+	}
 }
