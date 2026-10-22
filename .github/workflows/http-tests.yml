@@ -6,6 +6,10 @@ on:
 
 jobs:
   test:
+    # Needs a live beacon node from the HTTP_ADDRESS and HTTP_TEST_CONCURRENCY
+    # variables. Skip when neither is set, as on this fork; with only one set,
+    # run, so the validation step reports the misconfiguration.
+    if: ${{ vars.HTTP_ADDRESS != '' || vars.HTTP_TEST_CONCURRENCY != '' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
