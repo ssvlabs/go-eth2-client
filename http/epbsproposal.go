@@ -554,6 +554,12 @@ func populateEPBSProposalValuesFromHeaders(proposal *api.VersionedEPBSProposal,
 
 		switch {
 		case strings.EqualFold(k, "Eth-Consensus-Block-Value"):
+			// Treat an empty value as absent, leaving the value unknown; see
+			// populateProposalDataFromHeaders.
+			if v == "" {
+				continue
+			}
+
 			target = &proposal.ConsensusValue
 		case strings.EqualFold(k, "Eth-Execution-Payload-Value"):
 			target = &proposal.ExecutionValue
