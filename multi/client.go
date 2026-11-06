@@ -16,6 +16,7 @@ package multi
 import (
 	"context"
 	"fmt"
+	nethttp "net/http"
 	"strings"
 	"time"
 
@@ -229,6 +230,15 @@ type callFunc func(ctx context.Context, client consensusclient.Service) (any, er
 // result in a provider failover.
 type errHandlerFunc func(ctx context.Context, client consensusclient.Service, err error) (bool, error)
 
+// rejection records a client that rejected a call with a user error (see
+// isUserError): its address, the error, and its penalty count when the call
+// started (see penalizeClient).
+type rejection struct {
+	address          string
+	err              error
+	penaltiesAtStart uint64
+}
+
 // doCall carries out a call on the active clients in turn until one succeeds.
 func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandlerFunc) (any, error) {
 	log := s.log.With().Logger()
@@ -255,6 +265,9 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 		// best client is refreshed once they are all known, so a failure every client
 		// shares moves nothing.
 		penalized []string
+		// rejections lists the clients that rejected this call with a user error, to
+		// penalize if another client serves it.
+		rejections []rejection
 	)
 	defer func() {
 		if len(penalized) > 0 {
@@ -277,13 +290,7 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 		if err != nil {
 			log.Trace().Err(err).Msg("Potentially failing over due to error")
 
-			var apiErr *api.Error
-			switch {
-			case errors.As(err, &apiErr) && statusCodeFamily(apiErr.StatusCode) == 4:
-				log.Trace().Err(err).Msg("Not failing over on user error")
-
-				return res, err
-			case errors.Is(err, context.Canceled):
+			if errors.Is(err, context.Canceled) {
 				log.Trace().Msg("Not failing over on canceled context")
 
 				return res, err
@@ -302,12 +309,21 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 			}
 
 			score := s.currentScore(client.Address())
-			if !contextDone {
+			switch {
+			case isUserError(err):
+				// Either the request is at fault, and every client rejects it, or this
+				// client is: it lags behind the others, or does not serve the endpoint.
+				// Only another client serving the call tells which, so penalize this
+				// one if that happens.
+				rejections = append(rejections, rejection{address: client.Address(), err: err, penaltiesAtStart: penaltiesAtStart})
+			case !contextDone:
 				score, penalized = s.penalizeFailure(client.Address(), penaltiesAtStart, penalized)
+			default:
+				// The caller's context was already done, which is not the client's fault.
 			}
 
 			// Stop once the caller's context is done, as any further call would fail too.
-			if stopErr := contextStopError(ctx, err); stopErr != nil {
+			if stopErr := contextStopError(ctx, callError(err, rejections)); stopErr != nil {
 				log.Debug().Err(err).Int("score", score).Msg("Not failing over: context done")
 
 				return nil, stopErr
@@ -325,10 +341,42 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 			continue
 		}
 
+		// This client served the call, so the clients that rejected it were at fault.
+		for _, rejected := range rejections {
+			var score int
+			score, penalized = s.penalizeFailure(rejected.address, rejected.penaltiesAtStart, penalized)
+			s.log.Debug().Str("address", rejected.address).Int("score", score).
+				Msg("Client rejected a call another client served")
+		}
+
 		return res, nil
 	}
 
-	return nil, err
+	return nil, callError(err, rejections)
+}
+
+// callError returns the error for a call that no client served: err, the last
+// error, unless a client returned a user error.  Then it returns the first one, as
+// callers act on what it says, such as a 404 for a missing block, and a later
+// client's failure says nothing about the request.
+func callError(err error, rejections []rejection) error {
+	if len(rejections) > 0 {
+		return rejections[0].err
+	}
+
+	return err
+}
+
+// isUserError returns true if err is a 4xx response other than 408 Request Timeout
+// and 429 Too Many Requests, which report that the client could not serve the
+// request rather than that the request is at fault.
+func isUserError(err error) bool {
+	var apiErr *api.Error
+	if !errors.As(err, &apiErr) || statusCodeFamily(apiErr.StatusCode) != 4 {
+		return false
+	}
+
+	return apiErr.StatusCode != nethttp.StatusRequestTimeout && apiErr.StatusCode != nethttp.StatusTooManyRequests
 }
 
 // contextStopError returns nil while the caller's context is live.  Once it is
