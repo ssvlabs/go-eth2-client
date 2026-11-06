@@ -16,6 +16,7 @@ package multi
 import (
 	"context"
 	"fmt"
+	nethttp "net/http"
 	"strings"
 	"time"
 
@@ -213,6 +214,14 @@ type callFunc func(ctx context.Context, client consensusclient.Service) (any, er
 // result in a provider failover.
 type errHandlerFunc func(ctx context.Context, client consensusclient.Service, err error) (bool, error)
 
+// rejection is a client's rejection of a call with a user error (see
+// isUserError), to penalize if another client serves the call.
+type rejection struct {
+	address          string
+	err              error
+	penaltiesAtStart uint64
+}
+
 // doCall carries out a call on the active clients in turn until one succeeds.
 func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandlerFunc) (any, error) {
 	log := s.log.With().Logger()
@@ -238,6 +247,8 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 		// client is refreshed once, at the end, so a failure every client shares
 		// moves nothing.
 		penalized []string
+		// rejections lists the clients that rejected this call with a user error.
+		rejections []rejection
 	)
 	defer func() {
 		if len(penalized) > 0 {
@@ -258,13 +269,7 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 		if err != nil {
 			log.Trace().Err(err).Msg("Potentially failing over due to error")
 
-			var apiErr *api.Error
-			switch {
-			case errors.As(err, &apiErr) && statusCodeFamily(apiErr.StatusCode) == 4:
-				log.Trace().Err(err).Msg("Not failing over on user error")
-
-				return res, err
-			case errors.Is(err, context.Canceled):
+			if errors.Is(err, context.Canceled) {
 				log.Trace().Msg("Not failing over on canceled context")
 
 				return res, err
@@ -283,12 +288,19 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 			}
 
 			score := s.currentScore(client.Address())
-			if !contextDone {
+			switch {
+			case isUserError(err):
+				// The request may be at fault, or this client, if it lags behind or
+				// lacks the endpoint: penalize it only if another client serves the call.
+				rejections = append(rejections, rejection{address: client.Address(), err: err, penaltiesAtStart: penaltiesAtStart})
+			case !contextDone:
 				score, penalized = s.penalizeFailure(client.Address(), penaltiesAtStart, penalized)
+			default:
+				// The caller's context was already done.
 			}
 
 			// Stop once the caller's context is done, as any further call would fail too.
-			if stopErr := contextStopError(ctx, err); stopErr != nil {
+			if stopErr := contextStopError(ctx, callError(err, rejections)); stopErr != nil {
 				log.Debug().Err(err).Int("score", score).Msg("Not failing over: context done")
 
 				return nil, stopErr
@@ -306,10 +318,39 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 			continue
 		}
 
+		// This client served the call, so the clients that rejected it were at fault.
+		for _, rejected := range rejections {
+			var score int
+			score, penalized = s.penalizeFailure(rejected.address, rejected.penaltiesAtStart, penalized)
+			s.log.Debug().Str("address", rejected.address).Int("score", score).
+				Msg("Client rejected a call another client served")
+		}
+
 		return res, nil
 	}
 
-	return nil, err
+	return nil, callError(err, rejections)
+}
+
+// callError returns the error for a call no client served: the first user error,
+// as callers act on it (a 404 for a missing block, say), or else the last error.
+func callError(err error, rejections []rejection) error {
+	if len(rejections) > 0 {
+		return rejections[0].err
+	}
+
+	return err
+}
+
+// isUserError returns true if err is a 4xx response blaming the request: 408 and
+// 429 instead report that the client could not serve it.
+func isUserError(err error) bool {
+	var apiErr *api.Error
+	if !errors.As(err, &apiErr) || statusCodeFamily(apiErr.StatusCode) != 4 {
+		return false
+	}
+
+	return apiErr.StatusCode != nethttp.StatusRequestTimeout && apiErr.StatusCode != nethttp.StatusTooManyRequests
 }
 
 // contextStopError returns nil while ctx is live.  Once it is done, it returns the

@@ -448,18 +448,191 @@ func TestDoCallPenalizesEachIncident(t *testing.T) {
 	require.Equal(t, maxClientScore-2, scoreOf(t, s, "a"))
 }
 
-// TestDoCallNoPenaltyOnUserError checks that a 4xx response is returned at once,
-// penalizing no client.
-func TestDoCallNoPenaltyOnUserError(t *testing.T) {
+// TestDoCallFailsOverOnUserError checks that a 4xx response fails over, and that
+// another client serving the call penalizes the client that returned it, moving
+// the best client off it.
+func TestDoCallFailsOverOnUserError(t *testing.T) {
 	s := newScoredService(t, "a", "b")
 
-	call := func(_ context.Context, _ consensusclient.Service) (any, error) {
-		return nil, &api.Error{StatusCode: 400}
+	call := func(_ context.Context, client consensusclient.Service) (any, error) {
+		if client.Address() == "a" {
+			return nil, &api.Error{StatusCode: 404}
+		}
+
+		return "ok", nil
+	}
+
+	res, err := s.doCall(context.Background(), call, nil)
+	require.NoError(t, err)
+	require.Equal(t, "ok", res)
+	require.Equal(t, maxClientScore-1, scoreOf(t, s, "a"))
+	require.Equal(t, maxClientScore, scoreOf(t, s, "b"))
+	require.Equal(t, "b", s.Address())
+}
+
+// TestDoCallUserErrorFromEveryClient checks that a 4xx response from every client
+// penalizes none of them, as the request is at fault, and returns the first
+// client's error.
+func TestDoCallUserErrorFromEveryClient(t *testing.T) {
+	s := newScoredService(t, "a", "b")
+
+	var calls []string
+	call := func(_ context.Context, client consensusclient.Service) (any, error) {
+		calls = append(calls, client.Address())
+
+		return nil, &api.Error{StatusCode: 400, Data: []byte(client.Address())}
 	}
 
 	_, err := s.doCall(context.Background(), call, nil)
-	require.Error(t, err)
+	var apiErr *api.Error
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, "a", string(apiErr.Data))
+	require.Equal(t, []string{"a", "b"}, calls)
 	require.Equal(t, maxClientScore, scoreOf(t, s, "a"))
+	require.Equal(t, maxClientScore, scoreOf(t, s, "b"))
+	require.Equal(t, "a", s.Address())
+}
+
+// TestDoCallReturnsUserErrorOverLaterFailure checks that when no client serves a
+// call, a 4xx response is returned rather than a later client's failure, and only
+// the failing client is penalized.
+func TestDoCallReturnsUserErrorOverLaterFailure(t *testing.T) {
+	s := newScoredService(t, "a", "b")
+
+	call := func(_ context.Context, client consensusclient.Service) (any, error) {
+		if client.Address() == "a" {
+			return nil, &api.Error{StatusCode: 404}
+		}
+
+		return nil, errors.New("boom")
+	}
+
+	_, err := s.doCall(context.Background(), call, nil)
+	var apiErr *api.Error
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, 404, apiErr.StatusCode)
+	require.Equal(t, maxClientScore, scoreOf(t, s, "a"))
+	require.Equal(t, maxClientScore-1, scoreOf(t, s, "b"))
+}
+
+// TestDoCallKeepsUserErrorWhenStopping checks that when the caller's deadline
+// passes during a later client's call, the returned error carries the 4xx response
+// as well as the context's error.
+func TestDoCallKeepsUserErrorWhenStopping(t *testing.T) {
+	s := newScoredService(t, "a", "b")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	call := func(ctx context.Context, client consensusclient.Service) (any, error) {
+		if client.Address() == "a" {
+			return nil, &api.Error{StatusCode: 404}
+		}
+		// Hang until the caller's deadline passes.
+		<-ctx.Done()
+
+		return nil, ctx.Err()
+	}
+
+	_, err := s.doCall(ctx, call, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	var apiErr *api.Error
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, 404, apiErr.StatusCode)
+	require.Equal(t, maxClientScore, scoreOf(t, s, "a"))
+	require.Equal(t, maxClientScore-1, scoreOf(t, s, "b"))
+}
+
+// TestDoCallPenalizesTimeoutAndRateLimitResponses checks that 408 and 429
+// responses are failures rather than user errors: they penalize the client
+// whether or not another client serves the call.
+func TestDoCallPenalizesTimeoutAndRateLimitResponses(t *testing.T) {
+	for _, status := range []int{408, 429} {
+		s := newScoredService(t, "a", "b")
+
+		call := func(_ context.Context, client consensusclient.Service) (any, error) {
+			if client.Address() == "a" {
+				return nil, &api.Error{StatusCode: status}
+			}
+
+			return nil, &api.Error{StatusCode: 400}
+		}
+
+		_, err := s.doCall(context.Background(), call, nil)
+		var apiErr *api.Error
+		require.ErrorAs(t, err, &apiErr)
+		require.Equal(t, 400, apiErr.StatusCode, "status %d", status)
+		require.Equal(t, maxClientScore-1, scoreOf(t, s, "a"), "status %d", status)
+		require.Equal(t, maxClientScore, scoreOf(t, s, "b"), "status %d", status)
+	}
+}
+
+// TestDoCallErrHandlerSeesUserErrors checks that the call's error handler sees a
+// 4xx response, and can stop the call there: no further client is called, and no
+// client is penalized.
+func TestDoCallErrHandlerSeesUserErrors(t *testing.T) {
+	s := newScoredService(t, "a", "b")
+
+	var calls int
+	call := func(_ context.Context, _ consensusclient.Service) (any, error) {
+		calls++
+
+		return nil, &api.Error{StatusCode: 400}
+	}
+	noFailover := func(_ context.Context, _ consensusclient.Service, err error) (bool, error) {
+		return false, fmt.Errorf("handled: %w", err)
+	}
+
+	_, err := s.doCall(context.Background(), call, noFailover)
+	require.ErrorContains(t, err, "handled")
+	require.Equal(t, 1, calls)
+	require.Equal(t, maxClientScore, scoreOf(t, s, "a"))
+	require.Equal(t, maxClientScore, scoreOf(t, s, "b"))
+}
+
+// TestDoCallPenalizesRejectionOncePerIncident checks that calls a client rejects
+// together with a 4xx, which another client serves, cost it one point between
+// them, as failures do.
+func TestDoCallPenalizesRejectionOncePerIncident(t *testing.T) {
+	s := newScoredService(t, "a", "b")
+
+	const calls = 12
+
+	// a stalls until every call has reached it, then rejects them all.
+	var stalled sync.WaitGroup
+	stalled.Add(calls)
+	call := func(_ context.Context, client consensusclient.Service) (any, error) {
+		if client.Address() == "a" {
+			stalled.Done()
+			stalled.Wait()
+
+			return nil, &api.Error{StatusCode: 404}
+		}
+
+		return "ok", nil
+	}
+
+	var done sync.WaitGroup
+	results := make(chan any, calls)
+	for range calls {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+
+			res, err := s.doCall(context.Background(), call, nil)
+			if err != nil {
+				res = err
+			}
+			results <- res
+		}()
+	}
+	done.Wait()
+	close(results)
+
+	for res := range results {
+		require.Equal(t, "ok", res)
+	}
+	require.Equal(t, maxClientScore-1, scoreOf(t, s, "a"))
 	require.Equal(t, maxClientScore, scoreOf(t, s, "b"))
 }
 
