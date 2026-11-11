@@ -15,6 +15,8 @@ package multi
 
 import (
 	"context"
+	"fmt"
+	nethttp "net/http"
 	"strings"
 	"time"
 
@@ -41,6 +43,7 @@ func (s *Service) monitor(ctx context.Context) {
 			return
 		case <-time.After(30 * time.Second):
 			s.recheck(ctx)
+			s.decayScores()
 		}
 	}
 }
@@ -104,6 +107,7 @@ func (s *Service) deactivateClient(ctx context.Context, client consensusclient.S
 	s.activeClients = activeClients
 	s.inactiveClients = inactiveClients
 	s.setConnectionsMetric(ctx, len(s.activeClients), len(s.inactiveClients))
+	s.refreshBestClientLocked(nil)
 }
 
 // activateClient activates a client, moving it to the active list if not currently on it.
@@ -136,6 +140,69 @@ func (s *Service) activateClient(ctx context.Context, client consensusclient.Ser
 	s.activeClients = activeClients
 	s.inactiveClients = inactiveClients
 	s.setConnectionsMetric(ctx, len(s.activeClients), len(s.inactiveClients))
+	s.refreshBestClientLocked(nil)
+}
+
+// clientScore returns the client's score.  The caller must hold clientScoresMu.
+func (s *Service) clientScore(clientAddr string) int {
+	return s.clientScores[clientAddr]
+}
+
+// penalizeClient lowers the client's score by one for a failed call, down to
+// minClientScore, and returns the score.  Calls in flight together cost one point
+// between them: if the client has been penalized since the call started
+// (penaltiesAtStart), its score has already fallen.  The caller must hold
+// clientScoresMu.
+func (s *Service) penalizeClient(clientAddr string, penaltiesAtStart uint64) int {
+	score, scored := s.clientScores[clientAddr]
+	if !scored || score == minClientScore || s.clientPenalties[clientAddr] != penaltiesAtStart {
+		return score
+	}
+
+	s.clientPenalties[clientAddr]++
+	score--
+	s.clientScores[clientAddr] = score
+
+	return score
+}
+
+// currentScore returns the client's score.  It takes clientScoresMu.
+func (s *Service) currentScore(clientAddr string) int {
+	s.clientScoresMu.RLock()
+	defer s.clientScoresMu.RUnlock()
+
+	return s.clientScore(clientAddr)
+}
+
+// penalizeFailure is penalizeClient taking clientScoresMu.  It returns the score,
+// and penalized with the client added.
+func (s *Service) penalizeFailure(clientAddr string, penaltiesAtStart uint64, penalized []string) (int, []string) {
+	s.clientScoresMu.Lock()
+	defer s.clientScoresMu.Unlock()
+
+	return s.penalizeClient(clientAddr, penaltiesAtStart), append(penalized, clientAddr)
+}
+
+// decayScores raises each score below maxClientScore by one.  The monitor calls
+// it on every tick; it is how penalized clients recover.
+func (s *Service) decayScores() {
+	s.clientScoresMu.Lock()
+	var recovered []string
+	for addr, score := range s.clientScores {
+		if score < maxClientScore {
+			s.clientScores[addr] = score + 1
+			if score+1 == maxClientScore {
+				recovered = append(recovered, addr)
+			}
+		}
+	}
+	s.clientScoresMu.Unlock()
+
+	for _, addr := range recovered {
+		s.log.Debug().Str("address", addr).Msg("Client score recovered")
+	}
+
+	s.refreshBestClient()
 }
 
 // callFunc is the definition for a call function.  It provides a generic return interface
@@ -147,22 +214,26 @@ type callFunc func(ctx context.Context, client consensusclient.Service) (any, er
 // result in a provider failover.
 type errHandlerFunc func(ctx context.Context, client consensusclient.Service, err error) (bool, error)
 
+// rejection is a client's rejection of a call with a user error (see
+// isUserError), to penalize if another client serves the call.
+type rejection struct {
+	address          string
+	err              error
+	penaltiesAtStart uint64
+}
+
 // doCall carries out a call on the active clients in turn until one succeeds.
 func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandlerFunc) (any, error) {
 	log := s.log.With().Logger()
 	ctx = log.WithContext(ctx)
 
-	// Grab local copy of active clients in case it is updated whilst we are using it.
-	s.clientsMu.RLock()
-	activeClients := s.activeClients
-	s.clientsMu.RUnlock()
+	// Take a snapshot of the active clients, best first.
+	activeClients := s.activeClientsSortedByScore()
 
 	if len(activeClients) == 0 {
 		// There are no active clients; attempt to re-enable the inactive clients.
 		s.recheck(ctx)
-		s.clientsMu.RLock()
-		activeClients = s.activeClients
-		s.clientsMu.RUnlock()
+		activeClients = s.activeClientsSortedByScore()
 	}
 
 	if len(activeClients) == 0 {
@@ -172,45 +243,72 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 	var (
 		err error
 		res any
+		// penalized lists the clients penalized for failing this call.  The best
+		// client is refreshed once, at the end, so a failure every client shares
+		// moves nothing.
+		penalized []string
+		// rejections lists the clients that rejected this call with a user error.
+		rejections []rejection
 	)
+	defer func() {
+		if len(penalized) > 0 {
+			s.refreshBestClientAfterPenalties(penalized)
+		}
+	}()
 
 	for _, client := range activeClients {
 		log := log.With().Str("client", client.Name()).Str("address", client.Address()).Logger()
 
+		// A failure with the caller's context already done is not the client's fault.
+		contextDone := ctx.Err() != nil
+		s.clientScoresMu.RLock()
+		penaltiesAtStart := s.clientPenalties[client.Address()]
+		s.clientScoresMu.RUnlock()
+
 		res, err = call(ctx, client)
 		if err != nil {
-			log.Trace().Err(err).Msg("Potentially deactivating client due to error")
+			log.Trace().Err(err).Msg("Potentially failing over due to error")
 
-			var apiErr *api.Error
-			switch {
-			case errors.As(err, &apiErr) && statusCodeFamily(apiErr.StatusCode) == 4:
-				log.Trace().Err(err).Msg("Not deactivating client on user error")
-
-				return res, err
-			case errors.Is(err, context.Canceled):
-				log.Trace().Msg("Not deactivating client on canceled context")
-
-				return res, err
-			case errors.Is(err, context.DeadlineExceeded):
-				log.Trace().Msg("Not deactivating client on context deadline exceeded")
+			if errors.Is(err, context.Canceled) {
+				log.Trace().Msg("Not failing over on canceled context")
 
 				return res, err
 			}
 
+			// Any other error fails over, including the client's own timeout, so
+			// requests move off a hung client.
 			failover := true
 			if errHandler != nil {
 				failover, err = errHandler(ctx, client, err)
 			}
 
-			if failover {
-				log.Debug().Err(err).Msg("Deactivating client on error")
-				s.deactivateClient(ctx, client)
-
-				continue
+			if !failover {
+				// No failover required, return.
+				return res, err
 			}
 
-			// No failover required, return.
-			return res, err
+			score := s.currentScore(client.Address())
+			switch {
+			case isUserError(err):
+				// The request may be at fault, or this client, if it lags behind or
+				// lacks the endpoint: penalize it only if another client serves the call.
+				rejections = append(rejections, rejection{address: client.Address(), err: err, penaltiesAtStart: penaltiesAtStart})
+			case !contextDone:
+				score, penalized = s.penalizeFailure(client.Address(), penaltiesAtStart, penalized)
+			default:
+				// The caller's context was already done.
+			}
+
+			// Stop once the caller's context is done, as any further call would fail too.
+			if stopErr := contextStopError(ctx, callError(err, rejections)); stopErr != nil {
+				log.Debug().Err(err).Int("score", score).Msg("Not failing over: context done")
+
+				return nil, stopErr
+			}
+
+			log.Debug().Err(err).Int("score", score).Msg("Failing over on error")
+
+			continue
 		}
 
 		if res == nil {
@@ -220,10 +318,54 @@ func (s *Service) doCall(ctx context.Context, call callFunc, errHandler errHandl
 			continue
 		}
 
+		// This client served the call, so the clients that rejected it were at fault.
+		for _, rejected := range rejections {
+			var score int
+			score, penalized = s.penalizeFailure(rejected.address, rejected.penaltiesAtStart, penalized)
+			s.log.Debug().Str("address", rejected.address).Int("score", score).
+				Msg("Client rejected a call another client served")
+		}
+
 		return res, nil
 	}
 
-	return nil, err
+	return nil, callError(err, rejections)
+}
+
+// callError returns the error for a call no client served: the first user error,
+// as callers act on it (a 404 for a missing block, say), or else the last error.
+func callError(err error, rejections []rejection) error {
+	if len(rejections) > 0 {
+		return rejections[0].err
+	}
+
+	return err
+}
+
+// isUserError returns true if err is a 4xx response blaming the request: 408 and
+// 429 instead report that the client could not serve it.
+func isUserError(err error) bool {
+	var apiErr *api.Error
+	if !errors.As(err, &apiErr) || statusCodeFamily(apiErr.StatusCode) != 4 {
+		return false
+	}
+
+	return apiErr.StatusCode != nethttp.StatusRequestTimeout && apiErr.StatusCode != nethttp.StatusTooManyRequests
+}
+
+// contextStopError returns nil while ctx is live.  Once it is done, it returns the
+// error for doCall to stop with: err, wrapped with the context's error unless it
+// already carries it.
+func contextStopError(ctx context.Context, err error) error {
+	ctxErr := ctx.Err()
+	switch {
+	case ctxErr == nil:
+		return nil
+	case errors.Is(err, ctxErr):
+		return err
+	default:
+		return fmt.Errorf("%w; last error: %w", ctxErr, err)
+	}
 }
 
 // providerInfo returns information on the provider.
